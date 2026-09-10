@@ -10,6 +10,7 @@ from gigwatch.config import Config, Filters, SourceConfig, load_config
 from gigwatch.filtering import filter_jobs, score_job
 from gigwatch import sources as sources_mod
 from gigwatch.sources import Job, fetch, fetch_remoteok, fetch_wwr
+from gigwatch.ranking import rank_jobs
 from gigwatch.state import load_state, mark_seen, new_ids, prune, save_state
 from gigwatch.alerts import format_jobs
 from gigwatch.filtering import ScoredJob
@@ -317,3 +318,187 @@ def test_format_jobs_output():
     assert "Acme" in text
     assert "https://example.com/j/1" in text
     assert "python" in text
+
+
+# ---------- HN "Who is Hiring" adapter (mocked Algolia) ----------
+
+HN_SEARCH = json.dumps({
+    "hits": [
+        {"objectID": "42000001", "title": "Ask HN: Who is hiring? (September 2026)"},
+        {"objectID": "42000002", "title": "Who is working at ...? (September 2026)"},
+    ],
+}).encode("utf-8")
+
+# The items/{id} endpoint returns the story with nested top-level comments.
+HN_ITEM = json.dumps({
+    "id": "42000001",
+    "title": "Ask HN: Who is hiring? (September 2026)",
+    "children": [
+        {
+            "id": "42000003",
+            "text": (
+                "I'm hiring!\n"
+                "Acme — Senior Python Engineer | Remote (Worldwide) | Full-time | "
+                "https://acme.com/jobs/1\n"
+                "Globex: Backend Developer (Go) | USA | Contract | "
+                "https://globex.com/jobs/2\n"
+                "Initech — Product Designer | Hybrid NYC | Full-time\n"
+                "Just a note about hiring culture, not a listing.\n"
+                "https://random-link.com\n"
+            ),
+        },
+        {
+            "id": "42000004",
+            "text": "Umbra — Staff Rust Engineer | Remote | $180k | "
+                   "https://umbra.com/jobs/9\n",
+        },
+    ],
+}).encode("utf-8")
+
+
+def _mock_hn(monkeypatch):
+    def fake_http(url, timeout=25):
+        if "/items/" in url:
+            return HN_ITEM
+        return HN_SEARCH
+    monkeypatch.setattr(sources_mod, "_http_get", fake_http)
+
+
+def test_hn_parse_jobs_extracts_listings():
+    from gigwatch.sources import _hn_parse_jobs
+    text = (
+        "I'm hiring!\n"
+        "Acme — Senior Python Engineer | Remote | Full-time | https://acme.com/1\n"
+        "Globex: Backend Developer (Go) | USA | Contract | https://globex.com/2\n"
+        "Just a note about hiring culture, not a listing.\n"
+        "https://random-link.com\n"
+    )
+    jobs = _hn_parse_jobs(text)
+    assert ("Senior Python Engineer", "Acme") in jobs
+    assert ("Backend Developer (Go)", "Globex") in jobs
+    # non-job lines are dropped
+    for title, company in jobs:
+        assert "note" not in title.lower()
+        assert company != "https"
+
+
+def test_hn_parse_jobs_handles_dashes_and_colons():
+    from gigwatch.sources import _hn_parse_jobs
+    jobs = _hn_parse_jobs("Acme — Backend Engineer | Remote\nGlobex: Product Designer\n")
+    assert ("Backend Engineer", "Acme") in jobs
+    assert ("Product Designer", "Globex") in jobs
+
+
+def test_fetch_hn_parses_thread_and_dedupes(monkeypatch):
+    _mock_hn(monkeypatch)
+    jobs = sources_mod.fetch_hn()
+    titles = [j.title for j in jobs]
+    assert "Senior Python Engineer" in titles
+    assert "Staff Rust Engineer" in titles
+    assert all(j.source == "hn" for j in jobs)
+    assert all(j.url.startswith("https://news.ycombinator.com/item?id=")
+               for j in jobs)
+    # ids are unique (deduped)
+    assert len({j.id for j in jobs}) == len(jobs)
+
+
+def test_fetch_hn_limit(monkeypatch):
+    _mock_hn(monkeypatch)
+    assert len(sources_mod.fetch_hn(limit=1)) == 1
+
+
+def test_fetch_dispatch_hn(monkeypatch):
+    _mock_hn(monkeypatch)
+    got = fetch(SourceConfig(type="hn"))
+    assert got and all(j.source == "hn" for j in got)
+
+
+def test_load_config_accepts_hn(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"sources": [{"type": "hn"}]}))
+    cfg = load_config(str(p))
+    assert cfg.sources[0].type == "hn"
+
+
+# ---------- ranking (heuristic + AI) ----------
+
+def _profile():
+    return {"title": "Backend Engineer", "skills": ["python", "backend"],
+            "location": "Remote", "notes": "senior, $150k+"}
+
+
+def test_heuristic_ranks_skill_match_first():
+    from gigwatch.ranking import rank_heuristic
+    jobs = [
+        _scored(jid="a", title="Senior Python Backend Engineer",
+                salary="$150k-$180k", location="Remote (Worldwide)"),
+        _scored(jid="b", title="Product Designer", salary="",
+                location="New York"),
+        _scored(jid="c", title="Junior Python Developer", salary="$60k",
+                location="Remote"),
+    ]
+    out = rank_heuristic(jobs, _profile())
+    assert [r.job.id for r in out][0] == "a"
+    assert all(0 <= r.score <= 100 for r in out)
+    assert all(r.method == "heuristic" for r in out)
+    assert out[0].score > out[-1].score
+    assert any("python" in r.rationale.lower() for r in out[:1])
+
+
+def test_heuristic_is_deterministic():
+    from gigwatch.ranking import rank_heuristic
+    jobs = [_scored(jid="a", title="Senior Python Backend Engineer"),
+            _scored(jid="b", title="Product Designer")]
+    assert [r.score for r in rank_heuristic(jobs, _profile())] == \
+           [r.score for r in rank_heuristic(jobs, _profile())]
+
+
+def test_rank_jobs_no_key_falls_back_to_heuristic(monkeypatch):
+    from gigwatch.ranking import rank_jobs
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    jobs = [_scored(jid="a", title="Senior Python Backend Engineer")]
+    out = rank_jobs(jobs, _profile(), use_ai=True)
+    assert out and out[0].method == "heuristic"
+
+
+def test_rank_jobs_ai_path(monkeypatch):
+    from gigwatch import ranking as rk
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://fake.invalid/v1")
+    monkeypatch.setenv("GIGWATCH_AI_MODEL", "test-model")
+    monkeypatch.setattr(rk, "_ai_chat", lambda prompt, k, b, m, timeout=60:
+                        json.dumps({"scores": [
+                            {"id": "j1", "score": 92, "rationale": "strong match"},
+                        ]}))
+    jobs = [_scored(jid="j1", title="Senior Python Backend Engineer")]
+    out = rank_jobs(jobs, _profile(), use_ai=True)
+    assert out[0].method == "ai"
+    assert out[0].score == 92
+    assert out[0].rationale == "strong match"
+
+
+def test_rank_jobs_ai_failure_falls_back_per_batch(monkeypatch):
+    from gigwatch import ranking as rk
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(rk, "_ai_chat",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    jobs = [_scored(jid="j1", title="Senior Python Backend Engineer")]
+    out = rank_jobs(jobs, _profile(), use_ai=True)
+    assert out and out[0].method == "heuristic"
+
+
+def test_rank_jobs_no_ai_flag():
+    from gigwatch.ranking import rank_jobs
+    jobs = [_scored(jid="j1", title="Senior Python Backend Engineer")]
+    out = rank_jobs(jobs, _profile(), use_ai=False)
+    assert out and out[0].method == "heuristic"
+
+
+def test_parser_accepts_rank():
+    from gigwatch.cli import build_parser
+    args = build_parser().parse_args(
+        ["rank", "--skills", "python,backend", "--title", "Backend Engineer",
+         "--no-ai", "--format", "json"])
+    assert args.skills == "python,backend"
+    assert args.no_ai is True
+    assert args.format == "json"

@@ -5,4 +5,4 @@ local state file, and alerts you (console / email / Slack) only when a new
 matching gig appears.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

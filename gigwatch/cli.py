@@ -21,6 +21,7 @@ from gigwatch import __version__
 from gigwatch.alerts import send_all
 from gigwatch.config import Config, load_config
 from gigwatch.filtering import filter_jobs
+from gigwatch.ranking import rank_jobs
 from gigwatch.report import render
 from gigwatch.sources import Job, fetch
 from gigwatch.state import load_state, mark_seen, prune, save_state
@@ -59,7 +60,18 @@ def cmd_init(args) -> int:
               file=sys.stderr)
         return 1
     starter = {
-        "sources": [{"type": "remotive"}],
+        "sources": [
+            {"type": "remotive"},
+            {"type": "wwr"},
+            {"type": "remoteok"},
+            {"type": "hn"},
+        ],
+        "profile": {
+            "title": "Senior Software Engineer",
+            "skills": ["python", "backend", "api"],
+            "location": "remote",
+            "notes": "senior, $150k+",
+        },
         "filters": {
             "keywords": ["python", "backend", "api"],
             "require_all_keywords": False,
@@ -89,7 +101,9 @@ def cmd_init(args) -> int:
         json.dump(starter, fh, indent=2)
         fh.write("\n")
     print("wrote starter config to %s" % path)
-    print("edit filters.keywords to your skills, then run: gigwatch scan")
+    print("edit filters.keywords + profile to your skills, then run:")
+    print("  gigwatch scan   (alert on new matches)")
+    print("  gigwatch rank   (rank matches by fit to your profile)")
     return 0
 
 
@@ -175,6 +189,87 @@ def _args_with_interval(args):
     return args
 
 
+def cmd_rank(args) -> int:
+    """Fetch + filter, then rank matches for a profile (AI or heuristic)."""
+    cfg = load_config(args.config)
+    fmt = getattr(args, "format", "text")
+    jobs, _ = _fetch_all(cfg, args.verbose)
+    scored = filter_jobs(jobs, cfg.filters)
+    if not scored:
+        print("no jobs matched your filters (nothing to rank)", file=sys.stderr)
+        return 0
+
+    profile: dict = dict(cfg.profile or {})
+    if args.profile:
+        with open(args.profile, "r", encoding="utf-8") as fh:
+            profile = json.load(fh)
+    elif args.skills:
+        profile = {"skills": [s.strip() for s in args.skills.split(",") if s.strip()]}
+    if args.title:
+        profile["title"] = args.title
+    if args.location:
+        profile["location"] = args.location
+    if args.notes:
+        profile["notes"] = args.notes
+
+    use_ai = not args.no_ai
+    ranked = rank_jobs(scored, profile, use_ai=use_ai)
+    method = ranked[0].method if ranked else "none"
+    if fmt == "text":
+        print("ranked %d match(es) via %s engine" % (len(ranked), method))
+        print(_render_ranked_text(ranked))
+    elif fmt == "markdown":
+        print(_render_ranked_md(ranked))
+    else:
+        print(_render_ranked_json(ranked))
+    return 0
+
+
+def _render_ranked_text(ranked) -> str:
+    lines: List[str] = []
+    for i, r in enumerate(ranked, 1):
+        j = r.job
+        lines.append("%2d. [fit %s/100, %s] %s" % (i, r.score, r.method, j.title))
+        if j.company:
+            lines.append("     company: %s" % j.company)
+        if j.salary:
+            lines.append("     salary:  %s" % j.salary)
+        if j.location:
+            lines.append("     where:   %s" % j.location)
+        if r.rationale:
+            lines.append("     why:     %s" % r.rationale)
+        lines.append("     %s" % j.url)
+    return "\n".join(lines)
+
+
+def _render_ranked_md(ranked) -> str:
+    rows = [
+        "| # | Title | Company | Salary | Location | Fit | Why | URL |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for i, r in enumerate(ranked, 1):
+        j = r.job
+        rows.append("| %d | %s | %s | %s | %s | %s | %s | %s |" % (
+            i, j.title.replace("|", "\\|"), j.company or "-",
+            j.salary or "-", j.location or "-", r.score,
+            r.rationale.replace("|", "\\|") or "-", j.url))
+    return "\n".join(rows)
+
+
+def _render_ranked_json(ranked) -> str:
+    from dataclasses import asdict
+    out = []
+    for i, r in enumerate(ranked, 1):
+        obj = asdict(r.job)
+        obj["rank"] = i
+        obj["fit_score"] = r.score
+        obj["rationale"] = r.rationale
+        obj["method"] = r.method
+        obj["matched_keywords"] = list(r.matched_keywords)
+        out.append(obj)
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+
 def cmd_reset(args) -> int:
     cfg = load_config(args.config)
     if os.path.exists(cfg.state_file):
@@ -226,6 +321,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-age-days", type=int, default=90,
                     help="drop state entries older than this (0 = keep all)")
     sp.set_defaults(func=cmd_watch)
+
+    sp = sub.add_parser("rank",
+                        help="rank matched jobs for a profile (AI or heuristic)")
+    add_common(sp)
+    sp.add_argument("--profile", default=None,
+                    help="path to a JSON profile file "
+                         "(keys: title, skills[], location, notes)")
+    sp.add_argument("--skills", default=None,
+                    help="comma-separated skills (used if --profile omitted)")
+    sp.add_argument("--title", default=None, help="desired role title")
+    sp.add_argument("--location", default=None, help="preferred location")
+    sp.add_argument("--notes", default=None,
+                    help="free-text profile notes (e.g. 'senior, $150k+')")
+    sp.add_argument("--no-ai", action="store_true",
+                    help="force the deterministic heuristic engine")
+    sp.add_argument("--format", choices=("text", "markdown", "json"),
+                    default="text", help="output format (default: text)")
+    sp.set_defaults(func=cmd_rank)
 
     sp = sub.add_parser("reset", help="clear seen-state")
     add_common(sp)

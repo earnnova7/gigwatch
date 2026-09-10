@@ -36,11 +36,17 @@ are hosted SaaS that scrape your sessions and cost monthly. GigWatch is:
 
 ## Features
 
-- **Multiple feed sources** — Remotive, We Work Remotely, and RemoteOK
-  (built-in, no auth), any RSS/Atom feed, or any JSON endpoint returning a
-  list of job objects.
-- **Output formats** — `scan` and `list` take `--format text|markdown|json`
-  (a Markdown table or a JSON array of job objects for piping elsewhere).
+- **Multiple feed sources** — Remotive, We Work Remotely, RemoteOK, and
+  Hacker News "Who is Hiring?" (built-in, no auth), any RSS/Atom feed, or any
+  JSON endpoint returning a list of job objects.
+- **AI job ranking** — `gigwatch rank` scores every match 0-100 against a
+  profile you write (role, skills, location, notes) and explains *why*. Uses
+  an LLM when `OPENAI_API_KEY` is set (any OpenAI-compatible endpoint);
+  otherwise a deterministic, dependency-free heuristic. Either way you get a
+  ranked shortlist, not a raw dump.
+- **Output formats** — `scan`, `list`, and `rank` take `--format
+  text|markdown|json` (a Markdown table or a JSON array of job objects for
+  piping elsewhere).
 - **Skill-based filtering** — keyword matching (any/all), category and
   location filters, exclude-list, and a relevance score (title hits weigh
   more than body hits).
@@ -90,6 +96,26 @@ gigwatch watch
 0 * * * * cd /opt/gigwatch && /usr/bin/python3 -m gigwatch scan
 ```
 
+### Rank matches by fit
+
+`rank` fetches and filters like `scan`, then scores every match 0-100 against
+a profile and explains the score. It uses an LLM when `OPENAI_API_KEY` is set
+(any OpenAI-compatible endpoint; the model is auto-discovered), otherwise a
+deterministic heuristic — so it works with no key at all.
+
+```bash
+# Use the profile from config.json:
+gigwatch rank
+
+# Or pass a profile on the command line:
+gigwatch rank --title "Senior Python Engineer" \
+              --skills "python,backend,api" \
+              --location remote --notes "senior, \$150k+"
+
+# Force the offline heuristic (no LLM call):
+gigwatch rank --no-ai --format markdown
+```
+
 ### Alerts
 
 Console is on by default. To also get email/Slack, fill in the `alerts`
@@ -113,7 +139,8 @@ example. The top-level keys:
 
 | Key | Meaning |
 |-----|---------|
-| `sources` | List of feeds to watch. `{"type":"remotive"}`, `{"type":"wwr"}`, `{"type":"remoteok"}`, `{"type":"rss","url":...}`, or `{"type":"json","url":...}`. |
+| `sources` | List of feeds to watch. `{"type":"remotive"}`, `{"type":"wwr"}`, `{"type":"remoteok"}`, `{"type":"hn"}`, `{"type":"rss","url":...}`, or `{"type":"json","url":...}`. |
+| `profile` | Optional candidate profile for `rank`: `{"title","skills":[...],"location","notes"}`. |
 | `filters.keywords` | Your skills. A job matches if it contains any of these (or all, with `require_all_keywords`). |
 | `filters.categories` / `filters.locations` | Optional extra filters (empty = match anything). |
 | `filters.exclude_keywords` | Words that disqualify a job (e.g. `"intern"`, `"junior"`). |
@@ -137,12 +164,15 @@ present. Wrap in `{"jobs":[...]}`, `{"data":[...]}`, `{"results":[...]}`, or
 | `gigwatch init` | Write a starter `config.json`. |
 | `gigwatch list` | **Dry run** — fetch + filter + print matches. Does not touch state. |
 | `gigwatch scan` | Fetch, filter, alert on new matches, and record them as seen. |
+| `gigwatch rank` | Fetch + filter, then rank matches 0-100 for your `profile` (AI or heuristic). |
 | `gigwatch watch` | Loop `scan` every `poll_interval` seconds. |
 | `gigwatch reset` | Clear the seen-state (next scan alerts on everything that matches). |
 
 Useful flags: `--config PATH` (default `config.json`), `-v/--verbose`,
 `--max-age-days N` (state pruning; `0` keeps everything), and
-`--format text|markdown|json` on `scan`/`list`.
+`--format text|markdown|json` on `scan`/`list`/`rank`. For `rank`, also
+`--profile FILE` (a JSON profile), `--skills a,b,c`, `--title`, `--location`,
+`--notes`, and `--no-ai` (force the deterministic heuristic engine).
 
 ## How it works
 
@@ -169,9 +199,10 @@ it, back it up, or move it between machines.
 
 ## Roadmap / ideas
 
-- More built-in sources (Hacker News "Who is hiring", LinkedIn via RSS,
-  Upwork via a user-supplied export).
-- AI ranking: summarize each match and rank by fit to a profile you write.
+- ~~More built-in sources (Hacker News "Who is hiring")~~ — **done in 0.2.0**.
+- ~~AI ranking: summarize each match and rank by fit to a profile~~ — **done in
+  0.2.0** (`gigwatch rank`).
+- LinkedIn via RSS, Upwork via a user-supplied export.
 - Draft proposals / cover letters per match.
 - A tiny hosted tier (the natural monetization path — see below).
 

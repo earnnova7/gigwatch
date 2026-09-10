@@ -259,6 +259,159 @@ def fetch_remoteok(limit: Optional[int] = None) -> List[Job]:
     return [j for j in jobs if j.id and j.title]
 
 
+def _hn_algolia(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a query against the public HN Algolia search API (no auth)."""
+    qs = urllib.parse.urlencode(params)
+    url = "https://hn.algolia.com/api/v1/search?%s" % qs
+    return json.loads(_http_get(url).decode("utf-8", "replace"))
+
+
+def _hn_line_to_job(line: str):
+    """Parse one HN Who-is-Hiring line into ``(title, company)`` or ``None``.
+
+    Two common shapes:
+
+    * ``Company | Title | Location | Type | Link``  (pipe-separated, dominant)
+    * ``Company — Title`` / ``Company: Title`` / ``Company - Title``
+
+    The company must start with a capital letter and must not be a URL
+    scheme.  Only the first two fields are kept (title, company).  Lines
+    that don't match are ignored.
+    """
+    import re
+    s = line.strip().lstrip("-*•\t ").strip()
+    if not s:
+        return None
+
+    def _ok(company, title):
+        company = company.strip()
+        title = title.strip()
+        if not title or len(title) < 3:
+            return None
+        if not company or company.lower() in ("i", "we", "a", "the"):
+            return None
+        if company.lower() in ("http", "https", "mailto", "ftp"):
+            return None
+        # A company name never contains an em/en-dash or a colon — if it
+        # does, we mis-split (e.g. "Acme — Senior Engineer" as a company).
+        if "—" in company or "–" in company or ":" in company:
+            return None
+        if not re.search(r"[A-Za-z]", title):
+            return None
+        return (title, company)
+
+    # 1) "Company — Title" / "Company: Title" / "Company - Title"
+    #    (title may be followed by "| Location | Type | Link" fields).
+    m = re.match(r"^([A-Z][A-Za-z0-9&.'\-]{0,60}?)\s*(?:—|–|:|-)\s+(.{3,160})$", s)
+    if m:
+        got = _ok(m.group(1), m.group(2).split("|")[0].strip())
+        if got:
+            return got
+    # 2) pure pipe-separated: Company | Title | ...
+    if "|" in s:
+        parts = [p.strip() for p in s.split("|")]
+        if len(parts) >= 2:
+            got = _ok(parts[0], parts[1])
+            if got:
+                return got
+    return None
+
+
+def _hn_strip_html(text: str) -> str:
+    """Remove HTML tags and unescape entities from an HN comment body."""
+    import html
+    import re
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return text
+
+
+def _hn_parse_jobs(text: str) -> List[tuple]:
+    """Extract ``(title, company)`` pairs from a Who-is-Hiring comment.
+
+    The thread format is one job per line, typically::
+
+        <Company> | <Title> | <Location> | <Type> | <Link>
+
+    or ``<Company> — <Title>``.  We keep the first two fields of each
+    line.  Lines that are just a header, an "I'm hiring" note, or a bare
+    URL are skipped.
+    """
+    text = _hn_strip_html(text)
+    jobs: List[tuple] = []
+    for raw in text.splitlines():
+        parsed = _hn_line_to_job(raw)
+        if parsed:
+            jobs.append(parsed)
+    return jobs
+
+
+def _hn_get_json(url: str) -> Dict[str, Any]:
+    """Fetch a JSON document from the HN Algolia API."""
+    return json.loads(_http_get(url).decode("utf-8", "replace"))
+
+
+def fetch_hn(limit: Optional[int] = None) -> List[Job]:
+    """Fetch jobs from Hacker News "Who is Hiring?" threads.
+
+    Finds the most recent "Ask HN: Who is hiring?" megathread (via the
+    public Algolia search API — these run roughly monthly, first Monday),
+    then loads the full item tree via the ``items/{id}`` endpoint and
+    parses each top-level comment for individual job listings.  Each
+    listing becomes a :class:`Job` whose ``url`` deep-links to that
+    comment on the thread.
+    """
+    import time
+    now = int(time.time())
+    # The megathread is monthly; a 35-day window reliably covers the last one.
+    window = now - 35 * 86400
+    res = _hn_get_json(
+        "https://hn.algolia.com/api/v1/search?%s" % urllib.parse.urlencode({
+            "query": "who is hiring",
+            "tags": "story",
+            "numericFilters": "created_at_i>=%d" % window,
+            "hitsPerPage": 20,
+        }))
+    # Keep only the genuine megathread(s): "Ask HN: Who is hiring?" —
+    # exclude "analysis of …", "who wants to be hired", "show hn" tools, etc.
+    stories = []
+    for h in res.get("hits", []):
+        t = (h.get("title") or "").lower()
+        if "who is hiring" not in t or "analysis" in t:
+            continue
+        if "who wants to be hired" in t:
+            continue
+        if "show hn" in t:
+            continue
+        stories.append(h)
+    if not stories:
+        return []
+
+    jobs: List[Job] = []
+    for story in stories:
+        sid = story.get("objectID")
+        item = _hn_get_json("https://hn.algolia.com/api/v1/items/%s" % sid)
+        for ch in item.get("children", [])[:100]:
+            text = ch.get("text") or ""
+            if not text:
+                continue
+            cid = ch.get("id")
+            base_url = "https://news.ycombinator.com/item?id=%s" % cid
+            desc = _hn_strip_html(text)[:400]
+            for title, company in _hn_parse_jobs(text):
+                jobs.append(Job(
+                    id=_hashlib_sha1("%s|%s" % (cid, title)),
+                    title=title,
+                    company=company,
+                    url=base_url,
+                    source="hn",
+                    description=desc,
+                ))
+    if limit:
+        jobs = jobs[:limit]
+    return [j for j in jobs if j.id and j.title]
+
+
 def fetch(source) -> List[Job]:
     """Dispatch to the right fetcher for a :class:`SourceConfig`."""
     if source.type == "remotive":
@@ -267,6 +420,8 @@ def fetch(source) -> List[Job]:
         return fetch_wwr(source.limit)
     if source.type == "remoteok":
         return fetch_remoteok(source.limit)
+    if source.type == "hn":
+        return fetch_hn(source.limit)
     if source.type == "rss":
         return fetch_rss(source.url, source.limit)
     if source.type == "json":
