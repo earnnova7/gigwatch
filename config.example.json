@@ -1,6 +1,8 @@
 {
   "sources": [
     { "type": "remotive" },
+    { "type": "wwr" },
+    { "type": "remoteok" },
     {
       "type": "rss",
       "url": "https://www.python.org/jobs/feed/rss/",

@@ -36,8 +36,11 @@ are hosted SaaS that scrape your sessions and cost monthly. GigWatch is:
 
 ## Features
 
-- **Multiple feed sources** — Remotive (built-in, no auth), any RSS/Atom feed,
-  or any JSON endpoint returning a list of job objects.
+- **Multiple feed sources** — Remotive, We Work Remotely, and RemoteOK
+  (built-in, no auth), any RSS/Atom feed, or any JSON endpoint returning a
+  list of job objects.
+- **Output formats** — `scan` and `list` take `--format text|markdown|json`
+  (a Markdown table or a JSON array of job objects for piping elsewhere).
 - **Skill-based filtering** — keyword matching (any/all), category and
   location filters, exclude-list, and a relevance score (title hits weigh
   more than body hits).
@@ -110,7 +113,7 @@ example. The top-level keys:
 
 | Key | Meaning |
 |-----|---------|
-| `sources` | List of feeds to watch. `{"type":"remotive"}`, `{"type":"rss","url":...}`, or `{"type":"json","url":...}`. |
+| `sources` | List of feeds to watch. `{"type":"remotive"}`, `{"type":"wwr"}`, `{"type":"remoteok"}`, `{"type":"rss","url":...}`, or `{"type":"json","url":...}`. |
 | `filters.keywords` | Your skills. A job matches if it contains any of these (or all, with `require_all_keywords`). |
 | `filters.categories` / `filters.locations` | Optional extra filters (empty = match anything). |
 | `filters.exclude_keywords` | Words that disqualify a job (e.g. `"intern"`, `"junior"`). |
@@ -138,7 +141,8 @@ present. Wrap in `{"jobs":[...]}`, `{"data":[...]}`, `{"results":[...]}`, or
 | `gigwatch reset` | Clear the seen-state (next scan alerts on everything that matches). |
 
 Useful flags: `--config PATH` (default `config.json`), `-v/--verbose`,
-`--max-age-days N` (state pruning; `0` keeps everything).
+`--max-age-days N` (state pruning; `0` keeps everything), and
+`--format text|markdown|json` on `scan`/`list`.
 
 ## How it works
 
@@ -165,8 +169,8 @@ it, back it up, or move it between machines.
 
 ## Roadmap / ideas
 
-- More built-in sources (We Work Remotely, RemoteOK, Hacker News "Who is
-  hiring", LinkedIn via RSS, Upwork via a user-supplied export).
+- More built-in sources (Hacker News "Who is hiring", LinkedIn via RSS,
+  Upwork via a user-supplied export).
 - AI ranking: summarize each match and rank by fit to a profile you write.
 - Draft proposals / cover letters per match.
 - A tiny hosted tier (the natural monetization path — see below).

@@ -6,12 +6,14 @@ import time
 
 import pytest
 
-from gigwatch.config import Config, Filters, load_config
+from gigwatch.config import Config, Filters, SourceConfig, load_config
 from gigwatch.filtering import filter_jobs, score_job
-from gigwatch.sources import Job
+from gigwatch import sources as sources_mod
+from gigwatch.sources import Job, fetch, fetch_remoteok, fetch_wwr
 from gigwatch.state import load_state, mark_seen, new_ids, prune, save_state
 from gigwatch.alerts import format_jobs
 from gigwatch.filtering import ScoredJob
+from gigwatch.report import render
 
 
 def make_job(jid="j1", title="Senior Python Backend Engineer",
@@ -147,6 +149,162 @@ def test_env_expansion(tmp_path, monkeypatch):
     }))
     cfg = load_config(str(p))
     assert cfg.alerts.email["to"] == "me@example.com"
+
+
+# ---------- new sources: We Work Remotely + RemoteOK (mocked HTTP) ----------
+
+WWR_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>We Work Remotely</title>
+<item>
+  <title>Acme Inc: Senior Python Engineer</title>
+  <region>Anywhere in the World</region>
+  <category>Back-End Programming</category>
+  <pubDate>Mon, 08 Sep 2026 12:00:00 +0000</pubDate>
+  <link>https://weworkremotely.com/remote-jobs/acme-senior-python-engineer</link>
+  <description>&lt;p&gt;We need a Python expert.&lt;/p&gt;</description>
+</item>
+<item>
+  <title>Globex: React Developer</title>
+  <region>USA Only</region>
+  <category>Front-End Programming</category>
+  <link>https://weworkremotely.com/remote-jobs/globex-react-developer</link>
+  <description>Build UIs.</description>
+</item>
+</channel></rss>"""
+
+REMOTEOK_JSON = json.dumps([
+    {"legal": "API Terms of Service: link back to Remote OK."},
+    {
+        "id": "12345",
+        "position": "Senior Backend Engineer",
+        "company": "Acme",
+        "url": "https://remoteOK.com/remote-jobs/12345",
+        "location": "Worldwide",
+        "salary_min": 120000,
+        "salary_max": 150000,
+        "tags": ["python", "golang"],
+        "date": "2026-09-08T12:00:00+00:00",
+        "description": "<p>Python and Go.</p>",
+    },
+    {
+        "id": "12346",
+        "position": "Product Designer",
+        "company": "Globex",
+        "url": "https://remoteOK.com/remote-jobs/12346",
+        "description": "Design things.",
+    },
+]).encode("utf-8")
+
+
+def _mock_http(monkeypatch, payload):
+    monkeypatch.setattr(sources_mod, "_http_get",
+                        lambda url, timeout=25: payload)
+
+
+def test_fetch_wwr_parses_company_region_and_source(monkeypatch):
+    _mock_http(monkeypatch, WWR_RSS)
+    jobs = fetch_wwr()
+    assert [j.title for j in jobs] == ["Senior Python Engineer", "React Developer"]
+    assert jobs[0].company == "Acme Inc"
+    assert jobs[0].location == "Anywhere in the World"
+    assert jobs[0].category == "Back-End Programming"
+    assert jobs[0].source == "wwr"
+    assert jobs[0].url.endswith("acme-senior-python-engineer")
+    assert jobs[0].id and "Python" in jobs[0].description
+
+
+def test_fetch_wwr_limit(monkeypatch):
+    _mock_http(monkeypatch, WWR_RSS)
+    assert len(fetch_wwr(limit=1)) == 1
+
+
+def test_fetch_remoteok_parses_fields_and_skips_metadata(monkeypatch):
+    _mock_http(monkeypatch, REMOTEOK_JSON)
+    jobs = fetch_remoteok()
+    assert [j.title for j in jobs] == ["Senior Backend Engineer", "Product Designer"]
+    assert jobs[0].company == "Acme"
+    assert jobs[0].id == "12345"
+    assert jobs[0].salary == "$120,000-$150,000"
+    assert jobs[0].location == "Worldwide"
+    assert jobs[0].tags == ["python", "golang"]
+    assert jobs[0].source == "remoteok"
+    assert jobs[1].salary == ""
+
+
+def test_fetch_dispatch_new_sources(monkeypatch):
+    _mock_http(monkeypatch, WWR_RSS)
+    got = fetch(SourceConfig(type="wwr"))
+    assert got and got[0].source == "wwr"
+    _mock_http(monkeypatch, REMOTEOK_JSON)
+    got = fetch(SourceConfig(type="remoteok", limit=1))
+    assert len(got) == 1 and got[0].source == "remoteok"
+
+
+def test_load_config_accepts_new_sources(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"sources": [{"type": "wwr"}, {"type": "remoteok"}]}))
+    cfg = load_config(str(p))
+    assert [s.type for s in cfg.sources] == ["wwr", "remoteok"]
+
+
+# ---------- report formatting (text / markdown / json) ----------
+
+def _scored(**kw):
+    score = kw.pop("score", 9.0)
+    matched = kw.pop("matched_keywords", ["python"])
+    return ScoredJob(job=make_job(**kw), score=score, matched_keywords=matched)
+
+
+def test_render_text_matches_listing():
+    out = render([_scored()], "text")
+    assert "[score 9.0] Senior Python Backend Engineer" in out
+    assert "company: Acme" in out
+    assert "https://example.com/j/1" in out
+
+
+def test_render_markdown_table():
+    out = render([_scored()], "markdown")
+    lines = out.splitlines()
+    assert lines[0] == "| # | Title | Company | Salary | Location | Score | URL |"
+    assert set(lines[1]) == set("|-")
+    assert "| 1 | Senior Python Backend Engineer | Acme | $120k-$150k | " \
+           "Remote (Worldwide) | 9.0 | https://example.com/j/1 |" in out
+
+
+def test_render_markdown_escapes_pipes():
+    out = render([_scored(title="Data | Pipeline Eng")], "markdown")
+    assert "Data \\| Pipeline Eng" in out
+
+
+def test_render_markdown_empty_still_has_header():
+    out = render([], "markdown")
+    assert out.splitlines()[0].startswith("| # | Title")
+
+
+def test_render_json_all_fields():
+    data = json.loads(render([_scored()], "json"))
+    assert isinstance(data, list) and len(data) == 1
+    obj = data[0]
+    for key in ("id", "title", "company", "url", "category", "location",
+                "salary", "tags", "published", "source", "description"):
+        assert key in obj
+    assert obj["score"] == 9.0
+    assert obj["matched_keywords"] == ["python"]
+
+
+def test_render_json_empty():
+    assert json.loads(render([], "json")) == []
+
+
+def test_render_unknown_format():
+    with pytest.raises(ValueError):
+        render([], "yaml")
+
+
+def test_parser_accepts_format():
+    from gigwatch.cli import build_parser
+    assert build_parser().parse_args(["list", "--format", "json"]).format == "json"
+    assert build_parser().parse_args(["scan", "--format", "markdown"]).format == "markdown"
 
 
 # ---------- alerts formatting ----------

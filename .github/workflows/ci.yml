@@ -23,3 +23,7 @@ jobs:
         run: pytest -v
       - name: Live integration (Remotive public API)
         run: pytest -m live -v
+      - name: Build package
+        run: |
+          pip install build
+          python -m build

@@ -180,10 +180,93 @@ def _hashlib_sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
 
 
+def _rss_items(url: str) -> List[ET.Element]:
+    """Fetch *url* and return its RSS 2.0 ``<item>`` elements."""
+    root = ET.fromstring(_http_get(url).decode("utf-8", "replace"))
+    return root.findall(".//item")
+
+
+def fetch_wwr(limit: Optional[int] = None) -> List[Job]:
+    """Fetch remote jobs from the We Work Remotely RSS feed.
+
+    WWR titles are ``"Company: Job Title"`` and each item carries ``<region>``
+    and ``<category>`` elements, so company/location come through cleanly.
+    """
+    url = "https://weworkremotely.com/remote-jobs.rss"
+    jobs: List[Job] = []
+    for it in _rss_items(url):
+        title = (it.findtext("title") or "").strip()
+        link = (it.findtext("link") or "").strip()
+        company = ""
+        if ": " in title:
+            company, title = (p.strip() for p in title.split(": ", 1))
+        jobs.append(
+            Job(
+                id=_hashlib_sha1(link or title),
+                title=title,
+                company=company,
+                url=link,
+                category=_clean(it.findtext("category") or ""),
+                location=_clean(it.findtext("region") or ""),
+                published=(it.findtext("pubDate") or "").strip(),
+                source="wwr",
+                description=_clean(it.findtext("description") or ""),
+            )
+        )
+    if limit:
+        jobs = jobs[:limit]
+    return [j for j in jobs if j.id and j.title]
+
+
+def _remoteok_salary(raw: Dict[str, Any]) -> str:
+    lo, hi = raw.get("salary_min"), raw.get("salary_max")
+    if lo and hi:
+        return "$%s-$%s" % (f"{int(lo):,}", f"{int(hi):,}")
+    if lo or hi:
+        return "$%s" % f"{int(lo or hi):,}"
+    return ""
+
+
+def fetch_remoteok(limit: Optional[int] = None) -> List[Job]:
+    """Fetch remote jobs from RemoteOK's public JSON API (no auth required).
+
+    RemoteOK retired its RSS feed; the ``/api`` endpoint returns a JSON array
+    whose first element is a licence/metadata blob (skipped here) followed by
+    one object per job.
+    """
+    url = "https://remoteok.com/api"
+    data = json.loads(_http_get(url).decode("utf-8", "replace"))
+    jobs: List[Job] = []
+    for raw in data:
+        if not isinstance(raw, dict) or not raw.get("position"):
+            continue  # skips the leading {"legal": ...} metadata entry
+        jobs.append(
+            Job(
+                id=str(raw.get("id") or _hashlib_sha1(raw.get("url", ""))),
+                title=_clean(raw.get("position", "")),
+                company=_clean(raw.get("company", "")),
+                url=raw.get("url", ""),
+                location=_clean(raw.get("location", "")),
+                salary=_remoteok_salary(raw),
+                tags=[_clean(t) for t in raw.get("tags", []) if t],
+                published=raw.get("date", ""),
+                source="remoteok",
+                description=_clean(raw.get("description", "")),
+            )
+        )
+    if limit:
+        jobs = jobs[:limit]
+    return [j for j in jobs if j.id and j.title]
+
+
 def fetch(source) -> List[Job]:
     """Dispatch to the right fetcher for a :class:`SourceConfig`."""
     if source.type == "remotive":
         return fetch_remotive(source.limit)
+    if source.type == "wwr":
+        return fetch_wwr(source.limit)
+    if source.type == "remoteok":
+        return fetch_remoteok(source.limit)
     if source.type == "rss":
         return fetch_rss(source.url, source.limit)
     if source.type == "json":

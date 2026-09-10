@@ -21,6 +21,7 @@ from gigwatch import __version__
 from gigwatch.alerts import send_all
 from gigwatch.config import Config, load_config
 from gigwatch.filtering import filter_jobs
+from gigwatch.report import render
 from gigwatch.sources import Job, fetch
 from gigwatch.state import load_state, mark_seen, prune, save_state
 
@@ -94,19 +95,28 @@ def cmd_init(args) -> int:
 
 def cmd_scan(args) -> int:
     cfg = load_config(args.config)
+    fmt = getattr(args, "format", "text")
     jobs, fetch_errors = _fetch_all(cfg, args.verbose)
 
     scored = filter_jobs(jobs, cfg.filters)
     state = load_state(cfg.state_file)
     new_matches = [s for s in scored if s.job.id not in state]
 
-    print("scanned %d job(s) from %d source(s); %d match filter; %d new"
-          % (len(jobs), len([s for s in cfg.sources if s.enabled]),
-             len(scored), len(new_matches)))
+    if fmt == "text":
+        print("scanned %d job(s) from %d source(s); %d match filter; %d new"
+              % (len(jobs), len([s for s in cfg.sources if s.enabled]),
+                 len(scored), len(new_matches)))
+    else:
+        # Machine-readable output goes to stdout; silence the console alert so
+        # it doesn't interleave plain text into the markdown/JSON.
+        cfg.alerts.console = False
 
     alert_errors: List[str] = []
     if new_matches:
         alert_errors = send_all(new_matches, cfg.alerts)
+
+    if fmt != "text":
+        print(render(new_matches, fmt))
 
     # Mark every job that matched as seen (so it won't re-alert). Jobs that
     # don't match are left unmarked, so they can alert later if your filters
@@ -126,22 +136,16 @@ def cmd_scan(args) -> int:
 
 def cmd_list(args) -> int:
     cfg = load_config(args.config)
+    fmt = getattr(args, "format", "text")
     jobs, _ = _fetch_all(cfg, args.verbose)
     scored = filter_jobs(jobs, cfg.filters)
-    print("%d job(s) fetched, %d match your filters (dry run, state untouched)"
-          % (len(jobs), len(scored)))
-    for i, s in enumerate(scored, 1):
-        j = s.job
-        print("%2d. [score %s] %s" % (i, s.score, j.title))
-        if j.company:
-            print("     company: %s" % j.company)
-        if j.salary:
-            print("     salary:  %s" % j.salary)
-        if j.location:
-            print("     where:   %s" % j.location)
-        if s.matched_keywords:
-            print("     matched: %s" % ", ".join(s.matched_keywords))
-        print("     %s" % j.url)
+    if fmt == "text":
+        print("%d job(s) fetched, %d match your filters (dry run, state untouched)"
+              % (len(jobs), len(scored)))
+        if scored:
+            print(render(scored, "text"))
+    else:
+        print(render(scored, fmt))
     return 0
 
 
@@ -205,10 +209,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(sp)
     sp.add_argument("--max-age-days", type=int, default=90,
                     help="drop state entries older than this (0 = keep all)")
+    sp.add_argument("--format", choices=("text", "markdown", "json"),
+                    default="text", help="output format (default: text)")
     sp.set_defaults(func=cmd_scan)
 
     sp = sub.add_parser("list", help="dry run: show matches, no state change")
     add_common(sp)
+    sp.add_argument("--format", choices=("text", "markdown", "json"),
+                    default="text", help="output format (default: text)")
     sp.set_defaults(func=cmd_list)
 
     sp = sub.add_parser("watch", help="loop scan on an interval")
