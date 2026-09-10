@@ -17,15 +17,20 @@ class ScoredJob:
 
 
 def _match_keywords(job: Job, filters: Filters) -> List[str]:
-    # Keyword requirements (any/all-match and excludes) are evaluated against
-    # the TITLE only. The title is the reliable signal for what a role is;
-    # descriptions and other free text can mention a keyword incidentally
-    # ("we use Python internally") and would otherwise create false matches.
+    # Keyword matching (any/all-match, incl. require_all_keywords) is
+    # evaluated against the TITLE only. The title is the reliable signal for
+    # what a role is; descriptions and other free text can mention a keyword
+    # incidentally ("we use Python internally") and would otherwise create
+    # false matches.
     hay = job.title.lower()
     matched = [k for k in filters.keywords if k in hay]
     if filters.exclude_keywords:
+        # Exclude keywords are a safety net: they check the title AND the
+        # description, so a job that mentions an excluded term in its body
+        # (e.g. "intern") is blocked even when the title is clean.
+        excl = hay + " " + job.description.lower()
         for k in filters.exclude_keywords:
-            if k in hay:
+            if k in excl:
                 return []  # excluded
     if not filters.keywords:
         return []
