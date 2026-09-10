@@ -58,6 +58,10 @@
   .term .ttl{margin-left:8px;font:12px var(--mono);color:var(--muted)}
   .term pre{margin:0;padding:18px 20px;overflow-x:auto;font:13px/1.7 var(--mono);color:#c9d4e3}
   .g{color:var(--acc)} .b{color:var(--acc2)} .y{color:var(--warn)} .m{color:#7d8ea3}
+  .live-badge{display:inline-block;font:700 11px/1 var(--mono);color:#05221a;background:var(--acc);
+    padding:3px 8px;border-radius:999px;letter-spacing:.5px;animation:pulse 2s infinite}
+  .live-badge.off{background:var(--warn);color:#3a2a00;animation:none}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
   .demo-h{font:13px var(--mono);color:var(--muted);margin:22px 0 10px}
   .tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;align-items:start}
   .tier{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:28px 24px}
@@ -138,7 +142,16 @@
     <p class="lead">Real output from a live run on this machine — 297 jobs fetched across
       We Work Remotely, RemoteOK, and Hacker News, filtered to a Python/backend profile.</p>
 
-    <div class="demo-h">$ gigwatch list --format text</div>
+    <div class="demo-h" id="live-h">$ gigwatch list --format text   <span class="live-badge" id="live-badge">LIVE</span></div>
+    <div class="term"><div class="bar">
+      <span class="dot" style="background:#ff5f56"></span>
+      <span class="dot" style="background:#ffbd2e"></span>
+      <span class="dot" style="background:#27c93f"></span>
+      <span class="ttl">gigwatch — live feed <span id="live-updated" class="m"></span></span></div>
+<pre id="live-pre"><span class="m">loading live feed…</span></pre></div>
+    <p class="m" id="live-note" style="font-size:13px;margin-top:8px"></p>
+
+    <div class="demo-h" style="margin-top:34px">$ gigwatch list --format text   <span class="m"># static snapshot</span></div>
     <div class="term"><div class="bar">
       <span class="dot" style="background:#ff5f56"></span>
       <span class="dot" style="background:#ffbd2e"></span>
@@ -243,5 +256,59 @@
     </div>
   </footer>
 </div>
+
+<script>
+// Live feed: the repo's GitHub Actions job runs gigwatch every 6h and commits
+// live-feed.json. We fetch it here so the page shows genuinely fresh jobs.
+(function () {
+  var pre = document.getElementById("live-pre");
+  var badge = document.getElementById("live-badge");
+  var updated = document.getElementById("live-updated");
+  var note = document.getElementById("live-note");
+  var esc = function (s) {
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  };
+
+  function render(data) {
+    var jobs = (data.jobs || []).slice(0, 8);
+    var lines = [];
+    lines.push('<span class="m">' + data.jobs_fetched + ' job(s) fetched from ' +
+      data.sources_scanned + ' sources; ' + data.matches + ' match the profile</span>');
+    jobs.forEach(function (j, i) {
+      lines.push('<span class="g">' + (i + 1) + '. [fit ' + j.score + '] ' + esc(j.title) + '</span>');
+      if (j.company) lines.push('     company: ' + esc(j.company));
+      if (j.location) lines.push('     where:   ' + esc(j.location));
+      if (j.matched && j.matched.length) lines.push('     matched: ' + esc(j.matched.join(", ")));
+      lines.push('     <a href="' + esc(j.url) + '">' + esc(j.url) + '</a>');
+    });
+    if (data.jobs && data.jobs.length > jobs.length) {
+      lines.push('<span class="m">…and ' + (data.jobs.length - jobs.length) + ' more matches</span>');
+    }
+    pre.innerHTML = lines.join("\n");
+    if (updated) updated.textContent = "· updated " + esc(data.generated_at);
+    if (note) note.textContent = "Fetched live from the public job boards " +
+      esc(data.generated_at) + " — refreshed every 6 hours by an automated run.";
+    if (badge) {
+      // If the feed is older than ~18h, flag it as stale rather than "live".
+      var ageH = (Date.now() - new Date(data.generated_at.replace(" UTC", "Z")).getTime()) / 36e5;
+      if (ageH > 18) {
+        badge.textContent = "STALE";
+        badge.className = "live-badge off";
+      }
+    }
+  }
+
+  function fail(msg) {
+    pre.innerHTML = '<span class="m">' + esc(msg) + '</span>';
+    if (badge) { badge.textContent = "OFFLINE"; badge.className = "live-badge off"; }
+    if (note) note.textContent = "Live feed unavailable right now — see the static snapshot below.";
+  }
+
+  fetch("live-feed.json", { cache: "no-store" })
+    .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(render)
+    .catch(function (e) { fail("could not load live feed (" + e.message + ")"); });
+})();
+</script>
 </body>
 </html>

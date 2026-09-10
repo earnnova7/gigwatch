@@ -1,0 +1,32 @@
+name: Live feed
+
+# Runs gigwatch against the public job boards, commits the real output to
+# live-feed.json, and lets the landing page show genuinely fresh data.
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e .
+      - name: Generate live feed
+        run: python scripts/make_live_feed.py live-feed.json
+      - name: Commit if changed
+        run: |
+          git config user.name "gigwatch-bot"
+          git config user.email "gigwatch-bot@users.noreply.github.com"
+          if git diff --quiet live-feed.json; then
+            echo "no change, skipping"
+          else
+            git add live-feed.json
+            git commit -m "chore: refresh live feed ($(date -u +%Y-%m-%d\ %H:%M\ UTC))"
+            git push
+          fi
