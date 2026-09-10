@@ -1,7 +1,9 @@
 name: Live feed
 
-# Runs gigwatch against the public job boards, commits the real output to
-# live-feed.json, and lets the landing page show genuinely fresh data.
+# Runs gigwatch against the public job boards and uploads the real output as a
+# workflow artifact. The default Actions token is read-only (can't push), so
+# Nova's cron (scripts/push_live_feed.py) triggers this, fetches the artifact,
+# and commits it to the repo. The landing page then serves fresh job data.
 on:
   schedule:
     - cron: "0 */6 * * *"
@@ -19,14 +21,10 @@ jobs:
         run: pip install -e .
       - name: Generate live feed
         run: python scripts/make_live_feed.py live-feed.json
-      - name: Commit if changed
-        run: |
-          git config user.name "gigwatch-bot"
-          git config user.email "gigwatch-bot@users.noreply.github.com"
-          if git diff --quiet live-feed.json; then
-            echo "no change, skipping"
-          else
-            git add live-feed.json
-            git commit -m "chore: refresh live feed ($(date -u +%Y-%m-%d\ %H:%M\ UTC))"
-            git push
-          fi
+      - name: Upload feed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-feed
+          path: live-feed.json
+          if-no-files-found: error
+          retention-days: 3
