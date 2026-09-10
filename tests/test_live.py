@@ -21,9 +21,18 @@ def test_remotive_returns_jobs():
 
 @pytest.mark.live
 def test_remotive_filter_end_to_end():
+    """Filter with a broad keyword set that Remotive reliably has."""
     jobs = fetch_remotive(limit=200)
-    f = Filters(keywords=["python"], min_score=1.0)
+    assert len(jobs) > 0, "Remotive returned no jobs at all"
+    # Use keywords that are common on remote boards; the point is the
+    # filter pipeline works end-to-end, not that one specific language
+    # is always present.
+    f = Filters(keywords=["react", "golang", "python", "java", "node"], min_score=1.0)
     out = filter_jobs(jobs, f)
-    # Remotive is a remote-work board; python roles exist there regularly.
-    assert len(out) >= 1
+    # At least one of these should match on any given day; if none do,
+    # the board is empty or the API changed shape — fail loudly.
+    assert len(out) >= 1, (
+        f"No matches for common tech keywords among {len(jobs)} jobs. "
+        f"Titles: {[j.title for j in jobs[:10]]}"
+    )
     assert all(s.score >= 1.0 for s in out)
