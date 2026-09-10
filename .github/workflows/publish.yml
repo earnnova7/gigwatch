@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+  # Manual trigger: Settings > Actions > Publish > Run workflow, or
+  # `gh workflow run publish.yml`. Lets us re-run after adding the secret.
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -19,8 +22,19 @@ jobs:
         run: python -m build
       - name: Check artifacts
         run: twine check dist/*
+      - name: Show build artifacts
+        run: ls -la dist/
       - name: Publish to PyPI
+        # Only upload when a PyPI token is configured. Without it we still
+        # build + validate (above) and the run stays green, so the repo's CI
+        # is never red just because the credential isn't set yet.
+        if: env.TWINE_PASSWORD != ''
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.TWINE_PASSWORD }}
         run: twine upload dist/*
+      - name: No PyPI token configured
+        if: env.TWINE_PASSWORD == ''
+        run: |
+          echo "::warning::TWINE_PASSWORD secret is not set. Built and validated the sdist/wheel (see 'Show build artifacts') but did NOT upload to PyPI."
+          echo "To publish: add a PyPI API token as the repo secret TWINE_PASSWORD, then re-run this workflow."
