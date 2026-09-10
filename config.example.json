@@ -1,0 +1,36 @@
+{
+  "sources": [
+    { "type": "remotive" },
+    {
+      "type": "rss",
+      "url": "https://www.python.org/jobs/feed/rss/",
+      "limit": 100
+    }
+  ],
+  "filters": {
+    "keywords": ["python", "backend", "api", "django", "fastapi"],
+    "require_all_keywords": false,
+    "categories": [],
+    "locations": [],
+    "min_score": 1.0,
+    "exclude_keywords": ["intern", "junior"]
+  },
+  "alerts": {
+    "console": true,
+    "email": {
+      "to": "${GIGWATCH_EMAIL_TO}",
+      "from": "gigwatch@localhost",
+      "smtp_host": "smtp.example.com",
+      "smtp_port": 587,
+      "use_tls": true,
+      "username": "${GIGWATCH_SMTP_USER}",
+      "password": "${GIGWATCH_SMTP_PASS}"
+    },
+    "slack": {
+      "webhook_url": "${GIGWATCH_SLACK_WEBHOOK}"
+    },
+    "max_per_alert": 25
+  },
+  "state_file": "gigwatch-state.json",
+  "poll_interval": 900
+}
